@@ -84,6 +84,15 @@
     );
   }
 
+  function wsUrl() {
+    if (typeof window.__CATAN_WS__ !== "string") return "";
+    return window.__CATAN_WS__.trim();
+  }
+
+  function useWebSocket() {
+    return wsUrl().length > 0;
+  }
+
   function loadStore() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -127,6 +136,15 @@
   let profile = loadProfile();
   let selectedColor = COLORS[0].hex;
   let view = "hand";
+
+  let ws = null;
+  let intentionallyClosed = false;
+  let reconnectTimer = null;
+  let joinTimeout = null;
+  let wsConnected = false;
+  let awaitingFirstSync = false;
+  let pendingDrawReveal = false;
+  let knownCardIds = new Set();
 
   const $ = (id) => document.getElementById(id);
 
@@ -176,6 +194,238 @@
     if (game.log.length > 200) game.log.length = 200;
   }
 
+  function markHandsKnown(game) {
+    if (!profile || !game || !game.players[profile.playerId]) return;
+    knownCardIds = new Set(game.players[profile.playerId].hand.map((c) => c.id));
+  }
+
+  function showWsOverlay(text, hint) {
+    const o = $("ws-overlay");
+    if (!o) return;
+    o.classList.remove("hidden");
+    if ($("ws-overlay-text")) $("ws-overlay-text").textContent = text || "Connecting…";
+    if ($("ws-overlay-hint")) $("ws-overlay-hint").textContent = hint || "";
+  }
+
+  function hideWsOverlay() {
+    const o = $("ws-overlay");
+    if (o) o.classList.add("hidden");
+    if (joinTimeout) {
+      clearTimeout(joinTimeout);
+      joinTimeout = null;
+    }
+  }
+
+  function updateSyncPill() {
+    const el = $("sync-pill");
+    if (!el) return;
+    if (!useWebSocket()) {
+      el.textContent = "";
+      return;
+    }
+    if (wsConnected) {
+      el.textContent = "· Live";
+      el.className = "ml-2 font-semibold text-secondary";
+    } else {
+      el.textContent = "· Offline";
+      el.className = "ml-2 font-semibold text-error";
+    }
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function closeWebSocket() {
+    intentionallyClosed = true;
+    clearReconnectTimer();
+    if (joinTimeout) {
+      clearTimeout(joinTimeout);
+      joinTimeout = null;
+    }
+    if (ws) {
+      try {
+        ws.close();
+      } catch (_) {}
+      ws = null;
+    }
+    wsConnected = false;
+    updateSyncPill();
+  }
+
+  function sendWs(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify(obj));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function sendRoomJoin() {
+    if (!profile) return;
+    const color = profile.color || selectedColor || COLORS[0].hex;
+    sendWs({
+      type: "join",
+      gameSlug: profile.gameSlug,
+      playerId: profile.playerId,
+      name: profile.lastName,
+      color,
+    });
+  }
+
+  function sendRebind() {
+    if (!profile) return;
+    sendWs({
+      type: "rebind",
+      gameSlug: profile.gameSlug,
+      playerId: profile.playerId,
+    });
+  }
+
+  function sendAction(action, extra) {
+    if (!profile) return false;
+    return sendWs(
+      Object.assign(
+        {
+          type: "action",
+          action,
+          playerId: profile.playerId,
+        },
+        extra || {}
+      )
+    );
+  }
+
+  function handleWsMessage(ev) {
+    let data;
+    try {
+      data = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (!data || typeof data !== "object") return;
+
+    if (data.type === "error") {
+      if (awaitingFirstSync) {
+        hideWsOverlay();
+        awaitingFirstSync = false;
+        showSetup(typeof data.message === "string" ? data.message : "Server error");
+      }
+      return;
+    }
+
+    if (data.type === "sync" && data.game && data.gameSlug) {
+      if (joinTimeout) {
+        clearTimeout(joinTimeout);
+        joinTimeout = null;
+      }
+      const game = data.game;
+      store[data.gameSlug] = game;
+      persist();
+
+      const me = profile && game.players[profile.playerId];
+      if (pendingDrawReveal && me) {
+        pendingDrawReveal = false;
+        const newer = me.hand.filter((c) => !knownCardIds.has(c.id));
+        if (newer.length === 1) {
+          const c = newer[0];
+          $("modal-draw-card").innerHTML = cardBlock(c.type, false);
+          $("modal-draw").classList.remove("hidden");
+        }
+      }
+      markHandsKnown(game);
+
+      awaitingFirstSync = false;
+      hideWsOverlay();
+
+      if (profile && store[profile.gameSlug] && store[profile.gameSlug].players[profile.playerId]) {
+        if ($("screen-app").classList.contains("hidden")) {
+          $("screen-setup").classList.add("hidden");
+          $("screen-app").classList.remove("hidden");
+          closeDrawer();
+        }
+        renderApp();
+      }
+    }
+  }
+
+  function scheduleJoinTimeout() {
+    if (joinTimeout) clearTimeout(joinTimeout);
+    joinTimeout = setTimeout(() => {
+      if (!awaitingFirstSync) return;
+      awaitingFirstSync = false;
+      hideWsOverlay();
+      closeWebSocket();
+      showSetup("Could not reach the game server. Start the server in server/ or set window.__CATAN_WS__.");
+    }, 14000);
+  }
+
+  function openWebSocket() {
+    if (!useWebSocket()) return;
+    intentionallyClosed = false;
+    clearReconnectTimer();
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      wsConnected = true;
+      updateSyncPill();
+      sendRoomJoin();
+      return;
+    }
+
+    if (ws) {
+      try {
+        ws.close();
+      } catch (_) {}
+      ws = null;
+    }
+
+    let socket;
+    try {
+      socket = new WebSocket(wsUrl());
+    } catch (e) {
+      wsConnected = false;
+      updateSyncPill();
+      if (awaitingFirstSync) {
+        awaitingFirstSync = false;
+        hideWsOverlay();
+        showSetup("Invalid WebSocket URL.");
+      }
+      return;
+    }
+
+    ws = socket;
+
+    ws.onopen = () => {
+      wsConnected = true;
+      updateSyncPill();
+      sendRoomJoin();
+      if (awaitingFirstSync) scheduleJoinTimeout();
+    };
+
+    ws.onmessage = handleWsMessage;
+
+    ws.onclose = () => {
+      wsConnected = false;
+      updateSyncPill();
+      ws = null;
+      if (!intentionallyClosed && profile && useWebSocket()) {
+        reconnectTimer = setTimeout(() => {
+          openWebSocket();
+        }, 1600);
+      }
+    };
+
+    ws.onerror = () => {
+      wsConnected = false;
+      updateSyncPill();
+    };
+  }
+
   function renderColorPicker() {
     const el = $("color-picker");
     el.innerHTML = COLORS.map(
@@ -194,6 +444,8 @@
   }
 
   function showSetup(error) {
+    awaitingFirstSync = false;
+    hideWsOverlay();
     $("game-name").readOnly = false;
     $("screen-setup").classList.remove("hidden");
     $("screen-app").classList.add("hidden");
@@ -204,8 +456,10 @@
     if (profile) {
       gn.value = profile.gameName || "";
       pn.value = profile.lastName || "";
+      if (profile.color) selectedColor = profile.color;
     }
     renderColorPicker();
+    updateSyncPill();
   }
 
   function showApp() {
@@ -268,19 +522,25 @@
       return;
     }
 
+    const remoteLocked = useWebSocket() && !wsConnected;
+
     grid.innerHTML = me.hand
       .map((c) => {
         const m = CARD_META[c.type];
-        const allowed = m.playable && canPlayCardNow(me, c);
-        const waiting = m.playable && !allowed;
+        const allowed = m.playable && canPlayCardNow(me, c) && !remoteLocked;
+        const waitingTurn = m.playable && !canPlayCardNow(me, c) && !remoteLocked;
+        const waitingNet = m.playable && remoteLocked;
         const playBtn = m.playable
           ? allowed
             ? `<button type="button" class="play-card w-full py-2 bg-surface-container text-primary font-headline font-bold text-xs rounded-lg active:scale-95 transition-transform" data-id="${c.id}">Play card</button>`
-            : `<button type="button" disabled class="w-full py-2 bg-surface-dim text-on-surface-variant/50 font-headline font-bold text-xs rounded-lg cursor-not-allowed">Next turn</button>
-               <p class="font-label text-[10px] text-on-surface-variant text-center mt-1">Can’t play the turn you drew it</p>`
+            : waitingNet
+              ? `<button type="button" disabled class="w-full py-2 bg-surface-dim text-on-surface-variant/50 font-headline font-bold text-xs rounded-lg cursor-not-allowed">Offline</button>
+                 <p class="font-label text-[10px] text-on-surface-variant text-center mt-1">Reconnecting to server…</p>`
+              : `<button type="button" disabled class="w-full py-2 bg-surface-dim text-on-surface-variant/50 font-headline font-bold text-xs rounded-lg cursor-not-allowed">Next turn</button>
+                 <p class="font-label text-[10px] text-on-surface-variant text-center mt-1">Can’t play the turn you drew it</p>`
           : `<p class="font-label text-[10px] uppercase tracking-widest text-tertiary text-center py-2">Secret — do not play</p>`;
 
-        return `<div class="bg-surface-container-highest rounded-xl p-4 flex flex-col shadow-sm ${waiting ? "opacity-95" : ""}">
+        return `<div class="bg-surface-container-highest rounded-xl p-4 flex flex-col shadow-sm ${waitingTurn || waitingNet ? "opacity-95" : ""}">
         <div class="mb-3">${cardBlock(c.type, false)}</div>
         <p class="font-body text-xs text-on-surface-variant mb-3 flex-grow">${m.desc}</p>
         ${playBtn}
@@ -301,7 +561,7 @@
     const others = Object.entries(game.players).filter(([id]) => id !== profile.playerId);
 
     if (others.length === 0) {
-      el.innerHTML = `<p class="font-body text-sm text-on-surface-variant bg-surface-container-low rounded-xl p-4">No other players yet. Use the menu to add another player on this device.</p>`;
+      el.innerHTML = `<p class="font-body text-sm text-on-surface-variant bg-surface-container-low rounded-xl p-4">No other players in this room yet. Share the same game name; they’ll appear here when they join.</p>`;
       return;
     }
 
@@ -385,7 +645,14 @@
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-player-id");
         profile.playerId = id;
+        const p = game.players[id];
+        if (p) {
+          profile.lastName = p.name;
+          profile.color = p.color;
+        }
         saveProfile(profile);
+        markHandsKnown(game);
+        if (useWebSocket()) sendRebind();
         closeDrawer();
         renderApp();
       });
@@ -406,16 +673,25 @@
     $("header-sub").textContent = `${me.name} · deck helper`;
     $("deck-remaining").textContent = String(game.deck.length);
 
+    const remoteLocked = useWebSocket() && !wsConnected;
     const drawBtn = $("btn-draw");
-    drawBtn.disabled = game.deck.length === 0;
-    drawBtn.classList.toggle("opacity-50", game.deck.length === 0);
-    drawBtn.classList.toggle("cursor-not-allowed", game.deck.length === 0);
+    drawBtn.disabled = game.deck.length === 0 || remoteLocked;
+    drawBtn.classList.toggle("opacity-50", game.deck.length === 0 || remoteLocked);
+    drawBtn.classList.toggle("cursor-not-allowed", game.deck.length === 0 || remoteLocked);
+
+    const endBtn = $("btn-end-turn");
+    if (endBtn) {
+      endBtn.disabled = remoteLocked;
+      endBtn.classList.toggle("opacity-50", remoteLocked);
+      endBtn.classList.toggle("cursor-not-allowed", remoteLocked);
+    }
 
     renderPlayerChips(game);
     renderHand();
     renderOthers();
     renderLog();
     renderSwitchList();
+    updateSyncPill();
 
     $("panel-log").classList.toggle("hidden", view !== "log");
     $("nav-hand").classList.toggle("bg-surface-container-highest", view === "hand");
@@ -429,7 +705,29 @@
     if (main) main.classList.toggle("hidden", view === "log");
   }
 
-  function startOrJoin() {
+  function resolvePlayerId(slug, playerName) {
+    let playerId = null;
+    if (
+      profile &&
+      profile.gameSlug === slug &&
+      profile.lastName === playerName &&
+      profile.color === selectedColor
+    ) {
+      playerId = profile.playerId;
+    }
+    if (!playerId && store[slug]) {
+      for (const [id, p] of Object.entries(store[slug].players || {})) {
+        if (p.name === playerName && p.color === selectedColor) {
+          playerId = id;
+          break;
+        }
+      }
+    }
+    if (!playerId) playerId = uid();
+    return playerId;
+  }
+
+  function startOrJoinLocal() {
     const gameName = $("game-name").value.trim();
     const playerName = $("player-name").value.trim();
     $("setup-error").textContent = "";
@@ -445,15 +743,9 @@
     }
 
     const game = store[slug];
-    let playerId = null;
-    for (const [id, p] of Object.entries(game.players)) {
-      if (p.name === playerName && p.color === selectedColor) {
-        playerId = id;
-        break;
-      }
-    }
-    if (!playerId) {
-      playerId = uid();
+    const playerId = resolvePlayerId(slug, playerName);
+
+    if (!game.players[playerId]) {
       game.players[playerId] = {
         name: playerName,
         color: selectedColor,
@@ -469,6 +761,7 @@
       gameName,
       playerId,
       lastName: playerName,
+      color: selectedColor,
     };
     saveProfile(profile);
     persist();
@@ -477,7 +770,67 @@
     showApp();
   }
 
+  function startOrJoin() {
+    const gameName = $("game-name").value.trim();
+    const playerName = $("player-name").value.trim();
+    $("setup-error").textContent = "";
+
+    if (!gameName || !playerName) {
+      $("setup-error").textContent = "Enter a game name and your name.";
+      return;
+    }
+
+    const slug = slugify(gameName);
+    const playerId = resolvePlayerId(slug, playerName);
+
+    profile = {
+      gameSlug: slug,
+      gameName,
+      playerId,
+      lastName: playerName,
+      color: selectedColor,
+    };
+    saveProfile(profile);
+
+    if (!useWebSocket()) {
+      if (!store[slug]) {
+        store[slug] = emptyGameState();
+      }
+      const game = store[slug];
+      if (!game.players[playerId]) {
+        game.players[playerId] = {
+          name: playerName,
+          color: selectedColor,
+          hand: [],
+          played: [],
+          turnPhase: 0,
+        };
+        pushLog(game, playerId, `${playerName} joined the table.`);
+      }
+      persist();
+      $("game-name").readOnly = false;
+      Object.values(game.players).forEach(ensurePlayerTurnState);
+      showApp();
+      return;
+    }
+
+    awaitingFirstSync = true;
+    showWsOverlay("Joining room…", wsUrl());
+    intentionallyClosed = false;
+    openWebSocket();
+  }
+
   function drawCard() {
+    if (useWebSocket()) {
+      if (!wsConnected) return;
+      pendingDrawReveal = true;
+      sendAction("draw");
+      setTimeout(() => {
+        pendingDrawReveal = false;
+      }, 8000);
+      return;
+    }
+
     const game = currentGame();
     const me = currentPlayer();
     if (!game || !me || game.deck.length === 0) return;
@@ -493,6 +846,12 @@
   }
 
   function playCard(cardId) {
+    if (useWebSocket()) {
+      if (!wsConnected) return;
+      sendAction("play", { cardId });
+      return;
+    }
+
     const game = currentGame();
     const me = currentPlayer();
     if (!game || !me) return;
@@ -514,14 +873,22 @@
   }
 
   function newShuffledDeck() {
-    const game = currentGame();
-    if (!game) return;
     if (
       !confirm(
         "Start a fresh deck? All hands and played piles reset to empty; players stay. Log clears."
       )
     )
       return;
+
+    if (useWebSocket()) {
+      if (!wsConnected) return;
+      sendAction("resetDeck");
+      closeDrawer();
+      return;
+    }
+
+    const game = currentGame();
+    if (!game) return;
     game.deck = shuffle(buildDeck());
     Object.values(game.players).forEach((p) => {
       p.hand = [];
@@ -535,6 +902,12 @@
   }
 
   function endMyTurn() {
+    if (useWebSocket()) {
+      if (!wsConnected) return;
+      sendAction("endTurn");
+      return;
+    }
+
     const game = currentGame();
     const me = currentPlayer();
     if (!game || !me) return;
@@ -545,6 +918,7 @@
   }
 
   function leaveGame() {
+    closeWebSocket();
     clearProfile();
     profile = null;
     persist();
@@ -600,13 +974,29 @@
     store = loadStore();
     profile = loadProfile();
 
+    if (profile) {
+      if (!profile.color && profile.playerId && store[profile.gameSlug]) {
+        const p = store[profile.gameSlug].players[profile.playerId];
+        if (p) profile.color = p.color;
+      }
+      profile.color = profile.color || COLORS[0].hex;
+    }
+
     if (profile && store[profile.gameSlug] && store[profile.gameSlug].players[profile.playerId]) {
       Object.values(store[profile.gameSlug].players).forEach((p) => {
         if (!Array.isArray(p.hand)) p.hand = [];
         if (!Array.isArray(p.played)) p.played = [];
         ensurePlayerTurnState(p);
       });
-      showApp();
+      markHandsKnown(store[profile.gameSlug]);
+
+      if (useWebSocket()) {
+        awaitingFirstSync = true;
+        showWsOverlay("Syncing game…", wsUrl());
+        openWebSocket();
+      } else {
+        showApp();
+      }
     } else {
       if (profile && (!store[profile.gameSlug] || !store[profile.gameSlug].players[profile.playerId])) {
         clearProfile();

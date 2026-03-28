@@ -1,0 +1,13 @@
+# Optional: Render Blueprint — create a Web Service from the server/ folder.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: catan-cards-ws
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

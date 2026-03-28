@@ -35,6 +35,7 @@
             "tertiary-fixed": "#ffdea8",
             "primary-fixed": "#ffdbca",
             slate: "#7b6f83",
+            error: "#ba1a1a",
           },
           fontFamily: {
             headline: ["Epilogue", "sans-serif"],
@@ -54,6 +55,14 @@
   </style>
 </head>
 <body class="bg-surface text-on-surface min-h-screen pb-28">
+  <div id="ws-overlay" class="hidden fixed inset-0 z-[90] bg-surface/95 backdrop-blur-sm flex flex-col items-center justify-center gap-4 p-6 text-center">
+    <div class="inline-block p-4 rounded-xl bg-surface-container-high shadow-lg">
+      <span class="material-symbols-outlined text-primary-container text-4xl animate-pulse">cloud_sync</span>
+    </div>
+    <p class="font-headline font-bold text-lg text-on-surface" id="ws-overlay-text">Connecting to game server…</p>
+    <p class="font-body text-sm text-on-surface-variant max-w-xs" id="ws-overlay-hint"></p>
+  </div>
+
   <div id="screen-setup" class="min-h-screen flex flex-col items-center justify-center p-6">
     <main class="w-full max-w-md flex flex-col space-y-10">
       <header class="text-center space-y-4">
@@ -61,7 +70,7 @@
           <span class="material-symbols-outlined filled text-primary-container text-5xl">style</span>
         </div>
         <h1 class="font-headline font-black text-4xl tracking-tighter text-on-surface">Development Deck</h1>
-        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards (14 knights, 5 VP, 2 road, 2 year of plenty, 2 monopoly). One shared deck per game name on this device.</p>
+        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards. Same <strong>game name</strong> syncs across phones over WebSocket (plus localStorage on each device). Deploy the small server in <code class="text-xs bg-surface-container-high px-1 rounded">server/</code> and set <code class="text-xs bg-surface-container-high px-1 rounded">window.__CATAN_WS__</code> for production.</p>
       </header>
       <section class="space-y-6">
         <div class="space-y-2">
@@ -94,7 +103,7 @@
         </button>
         <div class="min-w-0">
           <h1 class="font-headline font-black text-lg text-primary tracking-tighter truncate" id="header-title">Catan</h1>
-          <p class="font-label text-[10px] text-on-surface-variant truncate" id="header-sub"></p>
+          <p class="font-label text-[10px] text-on-surface-variant truncate"><span id="header-sub"></span><span id="sync-pill" class="ml-2 font-semibold text-secondary"></span></p>
         </div>
       </div>
       <div class="flex items-center gap-2 flex-wrap justify-end">
@@ -182,6 +191,10 @@
     </div>
   </div>
 
+  <!-- Production: set your WebSocket URL before ws-config.js, e.g.:
+  <script>window.__CATAN_WS__ = "wss://your-renderer-url.onrender.com";</script>
+  -->
+  <script src="ws-config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
