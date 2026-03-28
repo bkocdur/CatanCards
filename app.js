@@ -1,6 +1,6 @@
-(function () {
-  "use strict";
+import PartySocket from "partysocket";
 
+function main() {
   const STORAGE_KEY = "catan_dev_games_v1";
   const PROFILE_KEY = "catan_dev_profile_v1";
 
@@ -84,13 +84,24 @@
     );
   }
 
-  function wsUrl() {
-    if (typeof window.__CATAN_WS__ !== "string") return "";
-    return window.__CATAN_WS__.trim();
+  function partyKitHost() {
+    if (typeof window.__PARTYKIT_HOST__ === "string" && window.__PARTYKIT_HOST__.trim()) {
+      return window.__PARTYKIT_HOST__.trim();
+    }
+    const h = location.hostname;
+    if (h === "localhost" || h === "127.0.0.1") return "localhost:1999";
+    return "";
   }
 
-  function useWebSocket() {
-    return wsUrl().length > 0;
+  function partyKitParty() {
+    if (typeof window.__PARTYKIT_PARTY__ === "string" && window.__PARTYKIT_PARTY__.trim()) {
+      return window.__PARTYKIT_PARTY__.trim();
+    }
+    return "catancards-party";
+  }
+
+  function usePartyKit() {
+    return partyKitHost().length > 0;
   }
 
   function loadStore() {
@@ -137,14 +148,17 @@
   let selectedColor = COLORS[0].hex;
   let view = "hand";
 
-  let ws = null;
+  let partySocket = null;
   let intentionallyClosed = false;
-  let reconnectTimer = null;
   let joinTimeout = null;
-  let wsConnected = false;
+  let partyConnected = false;
   let awaitingFirstSync = false;
   let pendingDrawReveal = false;
   let knownCardIds = new Set();
+  /** @type {string[]} DiceNow-style usernames currently in the PartyKit room */
+  let roomUsers = [];
+  /** @type {{ playerId: string; username: string; color: string }[]} */
+  let roomPresence = [];
 
   const $ = (id) => document.getElementById(id);
 
@@ -219,11 +233,11 @@
   function updateSyncPill() {
     const el = $("sync-pill");
     if (!el) return;
-    if (!useWebSocket()) {
+    if (!usePartyKit()) {
       el.textContent = "";
       return;
     }
-    if (wsConnected) {
+    if (partyConnected) {
       el.textContent = "· Live";
       el.className = "ml-2 font-semibold text-secondary";
     } else {
@@ -232,76 +246,66 @@
     }
   }
 
-  function clearReconnectTimer() {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-  }
-
-  function closeWebSocket() {
+  function closePartySocket() {
     intentionallyClosed = true;
-    clearReconnectTimer();
     if (joinTimeout) {
       clearTimeout(joinTimeout);
       joinTimeout = null;
     }
-    if (ws) {
+    if (partySocket) {
       try {
-        ws.close();
+        partySocket.close();
       } catch (_) {}
-      ws = null;
+      partySocket = null;
     }
-    wsConnected = false;
+    partyConnected = false;
     updateSyncPill();
   }
 
-  function sendWs(obj) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  function sendGameAction(action, extra) {
+    if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return false;
     try {
-      ws.send(JSON.stringify(obj));
+      partySocket.send(JSON.stringify(Object.assign({ action }, extra || {})));
       return true;
     } catch (_) {
       return false;
     }
   }
 
-  function sendRoomJoin() {
-    if (!profile) return;
-    const color = profile.color || selectedColor || COLORS[0].hex;
-    sendWs({
-      type: "join",
-      gameSlug: profile.gameSlug,
-      playerId: profile.playerId,
-      name: profile.lastName,
-      color,
-    });
+  function applyPartyPayload(data) {
+    if (Array.isArray(data.users)) roomUsers = data.users;
+    if (Array.isArray(data.presence)) roomPresence = data.presence;
+    if (!data.game || !profile) return;
+
+    store[profile.gameSlug] = data.game;
+    persist();
+
+    const me = data.game.players[profile.playerId];
+    if (pendingDrawReveal && me) {
+      pendingDrawReveal = false;
+      const newer = me.hand.filter((c) => !knownCardIds.has(c.id));
+      if (newer.length === 1) {
+        const c = newer[0];
+        $("modal-draw-card").innerHTML = cardBlock(c.type, false);
+        $("modal-draw").classList.remove("hidden");
+      }
+    }
+    markHandsKnown(data.game);
+
+    awaitingFirstSync = false;
+    hideWsOverlay();
+
+    if (profile && store[profile.gameSlug] && store[profile.gameSlug].players[profile.playerId]) {
+      if ($("screen-app").classList.contains("hidden")) {
+        $("screen-setup").classList.add("hidden");
+        $("screen-app").classList.remove("hidden");
+        closeDrawer();
+      }
+      renderApp();
+    }
   }
 
-  function sendRebind() {
-    if (!profile) return;
-    sendWs({
-      type: "rebind",
-      gameSlug: profile.gameSlug,
-      playerId: profile.playerId,
-    });
-  }
-
-  function sendAction(action, extra) {
-    if (!profile) return false;
-    return sendWs(
-      Object.assign(
-        {
-          type: "action",
-          action,
-          playerId: profile.playerId,
-        },
-        extra || {}
-      )
-    );
-  }
-
-  function handleWsMessage(ev) {
+  function handlePartyMessage(ev) {
     let data;
     try {
       data = JSON.parse(ev.data);
@@ -319,38 +323,20 @@
       return;
     }
 
-    if (data.type === "sync" && data.game && data.gameSlug) {
+    const gameTypes = ["history", "sync", "user_joined", "user_left"];
+    if (data.game && gameTypes.includes(data.type)) {
       if (joinTimeout) {
         clearTimeout(joinTimeout);
         joinTimeout = null;
       }
-      const game = data.game;
-      store[data.gameSlug] = game;
-      persist();
+      applyPartyPayload(data);
+      return;
+    }
 
-      const me = profile && game.players[profile.playerId];
-      if (pendingDrawReveal && me) {
-        pendingDrawReveal = false;
-        const newer = me.hand.filter((c) => !knownCardIds.has(c.id));
-        if (newer.length === 1) {
-          const c = newer[0];
-          $("modal-draw-card").innerHTML = cardBlock(c.type, false);
-          $("modal-draw").classList.remove("hidden");
-        }
-      }
-      markHandsKnown(game);
-
-      awaitingFirstSync = false;
-      hideWsOverlay();
-
-      if (profile && store[profile.gameSlug] && store[profile.gameSlug].players[profile.playerId]) {
-        if ($("screen-app").classList.contains("hidden")) {
-          $("screen-setup").classList.add("hidden");
-          $("screen-app").classList.remove("hidden");
-          closeDrawer();
-        }
-        renderApp();
-      }
+    if (Array.isArray(data.users)) {
+      roomUsers = data.users;
+      if (Array.isArray(data.presence)) roomPresence = data.presence;
+      renderApp();
     }
   }
 
@@ -360,70 +346,86 @@
       if (!awaitingFirstSync) return;
       awaitingFirstSync = false;
       hideWsOverlay();
-      closeWebSocket();
-      showSetup("Could not reach the game server. Start the server in server/ or set window.__CATAN_WS__.");
+      closePartySocket();
+      showSetup(
+        "Could not reach PartyKit. Run `npm run dev:party` or deploy with `npx partykit deploy`, then set window.__PARTYKIT_HOST__ on your Vercel site."
+      );
     }, 14000);
   }
 
-  function openWebSocket() {
-    if (!useWebSocket()) return;
+  function openPartySocket() {
+    if (!usePartyKit()) return;
     intentionallyClosed = false;
-    clearReconnectTimer();
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      wsConnected = true;
+    if (partySocket && partySocket.readyState === WebSocket.OPEN) {
+      partyConnected = true;
       updateSyncPill();
-      sendRoomJoin();
+      if (awaitingFirstSync) scheduleJoinTimeout();
       return;
     }
 
-    if (ws) {
+    if (partySocket) {
       try {
-        ws.close();
+        partySocket.close();
       } catch (_) {}
-      ws = null;
+      partySocket = null;
     }
 
-    let socket;
+    if (!profile) return;
+    const color = profile.color || selectedColor || COLORS[0].hex;
+
     try {
-      socket = new WebSocket(wsUrl());
+      partySocket = new PartySocket({
+        host: partyKitHost(),
+        party: partyKitParty(),
+        room: profile.gameSlug,
+        query: {
+          username: profile.lastName,
+          playerId: profile.playerId,
+          color,
+        },
+      });
     } catch (e) {
-      wsConnected = false;
+      partyConnected = false;
       updateSyncPill();
       if (awaitingFirstSync) {
         awaitingFirstSync = false;
         hideWsOverlay();
-        showSetup("Invalid WebSocket URL.");
+        showSetup("Could not open PartyKit connection.");
       }
       return;
     }
 
-    ws = socket;
-
-    ws.onopen = () => {
-      wsConnected = true;
+    partySocket.addEventListener("open", () => {
+      partyConnected = true;
       updateSyncPill();
-      sendRoomJoin();
       if (awaitingFirstSync) scheduleJoinTimeout();
-    };
+    });
 
-    ws.onmessage = handleWsMessage;
+    partySocket.addEventListener("message", handlePartyMessage);
 
-    ws.onclose = () => {
-      wsConnected = false;
+    partySocket.addEventListener("close", () => {
+      partyConnected = false;
       updateSyncPill();
-      ws = null;
-      if (!intentionallyClosed && profile && useWebSocket()) {
-        reconnectTimer = setTimeout(() => {
-          openWebSocket();
-        }, 1600);
-      }
-    };
+    });
 
-    ws.onerror = () => {
-      wsConnected = false;
+    partySocket.addEventListener("error", () => {
+      partyConnected = false;
       updateSyncPill();
-    };
+    });
+  }
+
+  function reconnectParty() {
+    if (!usePartyKit() || !profile || !partySocket) return;
+    intentionallyClosed = false;
+    partySocket.updateProperties({
+      query: {
+        username: profile.lastName,
+        playerId: profile.playerId,
+        color: profile.color || selectedColor || COLORS[0].hex,
+      },
+    });
+    partySocket.reconnect();
   }
 
   function renderColorPicker() {
@@ -522,7 +524,7 @@
       return;
     }
 
-    const remoteLocked = useWebSocket() && !wsConnected;
+    const remoteLocked = usePartyKit() && !partyConnected;
 
     grid.innerHTML = me.hand
       .map((c) => {
@@ -624,6 +626,26 @@
       .join("");
   }
 
+  function renderOnlineInRoom() {
+    const el = $("online-users");
+    if (!el) return;
+    if (!usePartyKit()) {
+      el.innerHTML = '<li class="text-on-surface-variant text-xs">PartyKit off (local-only mode).</li>';
+      return;
+    }
+    if (!roomUsers.length) {
+      el.innerHTML = '<li class="text-on-surface-variant text-xs">Waiting for connections…</li>';
+      return;
+    }
+    el.innerHTML = roomUsers
+      .map((u) => {
+        const pr = roomPresence.find((p) => p.username === u);
+        const dot = pr ? `<span class="inline-block w-2 h-2 rounded-full mr-2 align-middle" style="background:${pr.color}"></span>` : "";
+        return `<li class="py-1 font-body text-sm flex items-center">${dot}${escapeHtml(u)}</li>`;
+      })
+      .join("");
+  }
+
   function renderSwitchList() {
     const game = currentGame();
     const el = $("switch-player-list");
@@ -652,7 +674,7 @@
         }
         saveProfile(profile);
         markHandsKnown(game);
-        if (useWebSocket()) sendRebind();
+        if (usePartyKit()) reconnectParty();
         closeDrawer();
         renderApp();
       });
@@ -673,7 +695,7 @@
     $("header-sub").textContent = `${me.name} · deck helper`;
     $("deck-remaining").textContent = String(game.deck.length);
 
-    const remoteLocked = useWebSocket() && !wsConnected;
+    const remoteLocked = usePartyKit() && !partyConnected;
     const drawBtn = $("btn-draw");
     drawBtn.disabled = game.deck.length === 0 || remoteLocked;
     drawBtn.classList.toggle("opacity-50", game.deck.length === 0 || remoteLocked);
@@ -691,6 +713,7 @@
     renderOthers();
     renderLog();
     renderSwitchList();
+    renderOnlineInRoom();
     updateSyncPill();
 
     $("panel-log").classList.toggle("hidden", view !== "log");
@@ -792,7 +815,7 @@
     };
     saveProfile(profile);
 
-    if (!useWebSocket()) {
+    if (!usePartyKit()) {
       if (!store[slug]) {
         store[slug] = emptyGameState();
       }
@@ -815,16 +838,16 @@
     }
 
     awaitingFirstSync = true;
-    showWsOverlay("Joining room…", wsUrl());
+    showWsOverlay("Joining room…", partyKitHost());
     intentionallyClosed = false;
-    openWebSocket();
+    openPartySocket();
   }
 
   function drawCard() {
-    if (useWebSocket()) {
-      if (!wsConnected) return;
+    if (usePartyKit()) {
+      if (!partyConnected) return;
       pendingDrawReveal = true;
-      sendAction("draw");
+      sendGameAction("draw");
       setTimeout(() => {
         pendingDrawReveal = false;
       }, 8000);
@@ -846,9 +869,9 @@
   }
 
   function playCard(cardId) {
-    if (useWebSocket()) {
-      if (!wsConnected) return;
-      sendAction("play", { cardId });
+    if (usePartyKit()) {
+      if (!partyConnected) return;
+      sendGameAction("play", { cardId });
       return;
     }
 
@@ -880,9 +903,9 @@
     )
       return;
 
-    if (useWebSocket()) {
-      if (!wsConnected) return;
-      sendAction("resetDeck");
+    if (usePartyKit()) {
+      if (!partyConnected) return;
+      sendGameAction("resetDeck");
       closeDrawer();
       return;
     }
@@ -902,9 +925,9 @@
   }
 
   function endMyTurn() {
-    if (useWebSocket()) {
-      if (!wsConnected) return;
-      sendAction("endTurn");
+    if (usePartyKit()) {
+      if (!partyConnected) return;
+      sendGameAction("endTurn");
       return;
     }
 
@@ -918,7 +941,7 @@
   }
 
   function leaveGame() {
-    closeWebSocket();
+    closePartySocket();
     clearProfile();
     profile = null;
     persist();
@@ -990,10 +1013,10 @@
       });
       markHandsKnown(store[profile.gameSlug]);
 
-      if (useWebSocket()) {
+      if (usePartyKit()) {
         awaitingFirstSync = true;
-        showWsOverlay("Syncing game…", wsUrl());
-        openWebSocket();
+        showWsOverlay("Syncing game…", partyKitHost());
+        openPartySocket();
       } else {
         showApp();
       }
@@ -1011,4 +1034,6 @@
   } else {
     init();
   }
-})();
+}
+
+main();

@@ -70,7 +70,7 @@
           <span class="material-symbols-outlined filled text-primary-container text-5xl">style</span>
         </div>
         <h1 class="font-headline font-black text-4xl tracking-tighter text-on-surface">Development Deck</h1>
-        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards. Same <strong>game name</strong> syncs across phones over WebSocket (plus localStorage on each device). Deploy the small server in <code class="text-xs bg-surface-container-high px-1 rounded">server/</code> and set <code class="text-xs bg-surface-container-high px-1 rounded">window.__CATAN_WS__</code> for production.</p>
+        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards. Same <strong>game name</strong> = same <strong>PartyKit room</strong> (plus localStorage on each device). Deploy the worker with <code class="text-xs bg-surface-container-high px-1 rounded">npx partykit deploy</code> and set <code class="text-xs bg-surface-container-high px-1 rounded">window.__PARTYKIT_HOST__</code> on your Vercel build.</p>
       </header>
       <section class="space-y-6">
         <div class="space-y-2">
@@ -163,6 +163,11 @@
       </button>
     </div>
     <p class="font-body text-xs text-on-surface-variant">Switch seats on this device, or add another player to the same saved game.</p>
+    <div class="bg-surface-container-low rounded-xl p-3">
+      <span class="font-label text-xs uppercase tracking-widest text-on-surface-variant">In this room (online)</span>
+      <p class="font-body text-[10px] text-on-surface-variant mt-1 mb-2">DiceNow-style list from PartyKit; game state still syncs for everyone in the same room id.</p>
+      <ul id="online-users" class="list-none m-0 p-0"></ul>
+    </div>
     <div>
       <span class="font-label text-xs uppercase tracking-widest text-on-surface-variant">Switch player</span>
       <div id="switch-player-list" class="mt-2 space-y-2"></div>
@@ -191,10 +196,13 @@
     </div>
   </div>
 
-  <!-- Production: set your WebSocket URL before ws-config.js, e.g.:
-  <script>window.__CATAN_WS__ = "wss://your-renderer-url.onrender.com";</script>
+  <!-- Production (non-localhost): set PartyKit host from `npx partykit deploy` output, e.g.
+  <script>window.__PARTYKIT_HOST__ = "catancards-party.yourlogin.partykit.dev";</script>
+  Optional: <script>window.__PARTYKIT_PARTY__ = "catancards-party";</script> if your party name differs.
   -->
-  <script src="ws-config.js"></script>
-  <script src="app.js"></script>
+  <script type="importmap">
+    { "imports": { "partysocket": "https://esm.sh/partysocket@1.1.16" } }
+  </script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

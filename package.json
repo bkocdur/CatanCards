@@ -1,0 +1,23 @@
+{
+  "name": "catancards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Catan base-game development deck helper with PartyKit rooms.",
+  "scripts": {
+    "dev:party": "partykit dev",
+    "deploy:party": "partykit deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bkocdur/CatanCards.git"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "partysocket": "^1.1.16"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "partykit": "^0.0.115",
+    "typescript": "^6.0.2"
+  }
+}

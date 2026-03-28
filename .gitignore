@@ -1,5 +1,5 @@
 .DS_Store
 stitch-extracted/
 .vercel
-server/node_modules/
+node_modules/
 stitch (2).zip
