@@ -75,9 +75,12 @@ function pushLog(game: GameState, playerId: string, message: string, detail: str
 }
 
 export default class CatanParty implements Party.Server {
-  game!: GameState;
+  game: GameState;
 
-  constructor(readonly room: Party.Room) {}
+  constructor(readonly room: Party.Room) {
+    // Safe before onStart; onStart replaces from storage when ready.
+    this.game = emptyRoom();
+  }
 
   async onStart() {
     const saved = await this.room.storage.get<GameState>("game");
@@ -172,6 +175,31 @@ export default class CatanParty implements Party.Server {
 
     const st = sender.state as ConnState | null;
     const playerId = st?.playerId;
+
+    if (msg.action === "syncRequest") {
+      if (!playerId) return;
+      if (!this.game.players[playerId]) {
+        this.game.players[playerId] = {
+          name: st.username || "Guest",
+          color: st.color || "#9c4300",
+          hand: [],
+          played: [],
+          turnPhase: 0,
+        };
+        pushLog(this.game, playerId, `${st.username || "Guest"} joined the table.`, "");
+        await this.persist();
+      }
+      sender.send(
+        JSON.stringify({
+          type: "history" as const,
+          game: clone(this.game),
+          users: this.getUsernames(),
+          presence: this.getPresence(),
+        })
+      );
+      return;
+    }
+
     if (!playerId || !this.game.players[playerId]) return;
 
     const me = this.game.players[playerId];

@@ -44,7 +44,7 @@ Open `http://localhost:8080`. On localhost the client defaults `__PARTYKIT_HOST_
    <script>window.__PARTYKIT_HOST__ = "catancards-party.yourlogin.partykit.dev";</script>
    ```
 
-   Optional: `window.__PARTYKIT_PARTY__` if your party name in `partykit.json` is not `catancards-party`.
+   Optional: `window.__PARTYKIT_PARTY__` only if you add named entries under `partykit.json` → `parties`; the default URL segment is always **`main`** (the project `name` is only the deploy subdomain, not this path).
 
 PartyKit holds room state (deck, players, log) in **durable storage** via `room.storage` so it survives short idle periods; see PartyKit docs for limits.
 

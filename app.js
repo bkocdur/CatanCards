@@ -97,7 +97,8 @@ function main() {
     if (typeof window.__PARTYKIT_PARTY__ === "string" && window.__PARTYKIT_PARTY__.trim()) {
       return window.__PARTYKIT_PARTY__.trim();
     }
-    return "catancards-party";
+    // Path segment /parties/{this}/{room} — must match partykit.json `main` or `parties` keys, not the project name.
+    return "main";
   }
 
   function usePartyKit() {
@@ -213,12 +214,11 @@ function main() {
     knownCardIds = new Set(game.players[profile.playerId].hand.map((c) => c.id));
   }
 
-  function showWsOverlay(text, hint) {
+  function showWsOverlay(text) {
     const o = $("ws-overlay");
     if (!o) return;
     o.classList.remove("hidden");
     if ($("ws-overlay-text")) $("ws-overlay-text").textContent = text || "Connecting…";
-    if ($("ws-overlay-hint")) $("ws-overlay-hint").textContent = hint || "";
   }
 
   function hideWsOverlay() {
@@ -248,6 +248,7 @@ function main() {
 
   function closePartySocket() {
     intentionallyClosed = true;
+    stopSyncRequestRetries();
     if (joinTimeout) {
       clearTimeout(joinTimeout);
       joinTimeout = null;
@@ -272,6 +273,34 @@ function main() {
     }
   }
 
+  let syncRequestInterval = null;
+  let turnEndedToastTimer = null;
+
+  function stopSyncRequestRetries() {
+    if (syncRequestInterval) {
+      clearInterval(syncRequestInterval);
+      syncRequestInterval = null;
+    }
+  }
+
+  function startSyncRequestRetries() {
+    stopSyncRequestRetries();
+    if (!awaitingFirstSync) return;
+    let n = 0;
+    syncRequestInterval = setInterval(() => {
+      if (!awaitingFirstSync || !partySocket || partySocket.readyState !== WebSocket.OPEN) {
+        stopSyncRequestRetries();
+        return;
+      }
+      if (n >= 6) {
+        stopSyncRequestRetries();
+        return;
+      }
+      n += 1;
+      sendGameAction("syncRequest");
+    }, 2000);
+  }
+
   function applyPartyPayload(data) {
     if (Array.isArray(data.users)) roomUsers = data.users;
     if (Array.isArray(data.presence)) roomPresence = data.presence;
@@ -293,6 +322,7 @@ function main() {
     markHandsKnown(data.game);
 
     awaitingFirstSync = false;
+    stopSyncRequestRetries();
     hideWsOverlay();
 
     if (profile && store[profile.gameSlug] && store[profile.gameSlug].players[profile.playerId]) {
@@ -305,17 +335,23 @@ function main() {
     }
   }
 
-  function handlePartyMessage(ev) {
+  function processPartyJson(raw) {
+    if (raw == null || raw === "") return;
     let data;
     try {
-      data = JSON.parse(ev.data);
+      data = JSON.parse(typeof raw === "string" ? raw : String(raw));
     } catch {
       return;
     }
     if (!data || typeof data !== "object") return;
+    dispatchPartyMessage(data);
+  }
+
+  function dispatchPartyMessage(data) {
 
     if (data.type === "error") {
       if (awaitingFirstSync) {
+        stopSyncRequestRetries();
         hideWsOverlay();
         awaitingFirstSync = false;
         showSetup(typeof data.message === "string" ? data.message : "Server error");
@@ -340,27 +376,55 @@ function main() {
     }
   }
 
+  function handlePartyMessage(ev) {
+    const payload = ev.data;
+    if (payload == null || payload === "") return;
+    if (typeof payload === "string") {
+      processPartyJson(payload);
+      return;
+    }
+    if (payload instanceof Blob) {
+      payload.text().then(processPartyJson).catch(() => {});
+      return;
+    }
+    if (payload instanceof ArrayBuffer) {
+      processPartyJson(new TextDecoder().decode(payload));
+      return;
+    }
+    processPartyJson(payload);
+  }
+
   function scheduleJoinTimeout() {
     if (joinTimeout) clearTimeout(joinTimeout);
     joinTimeout = setTimeout(() => {
       if (!awaitingFirstSync) return;
       awaitingFirstSync = false;
+      stopSyncRequestRetries();
       hideWsOverlay();
       closePartySocket();
-      showSetup(
-        "Could not reach PartyKit. Run `npm run dev:party` or deploy with `npx partykit deploy`, then set window.__PARTYKIT_HOST__ on your Vercel site."
-      );
-    }, 14000);
+      showSetup("Could not connect to the live table. Check your connection and try again.");
+    }, 28000);
   }
 
   function openPartySocket() {
     if (!usePartyKit()) return;
     intentionallyClosed = false;
 
-    if (partySocket && partySocket.readyState === WebSocket.OPEN) {
+    if (!profile) return;
+
+    const sameRoom =
+      partySocket &&
+      partySocket.readyState === WebSocket.OPEN &&
+      partySocket.room === profile.gameSlug;
+
+    if (sameRoom) {
       partyConnected = true;
       updateSyncPill();
-      if (awaitingFirstSync) scheduleJoinTimeout();
+      if (awaitingFirstSync) {
+        scheduleJoinTimeout();
+        sendGameAction("syncRequest");
+        startSyncRequestRetries();
+      }
       return;
     }
 
@@ -371,7 +435,6 @@ function main() {
       partySocket = null;
     }
 
-    if (!profile) return;
     const color = profile.color || selectedColor || COLORS[0].hex;
 
     try {
@@ -396,10 +459,16 @@ function main() {
       return;
     }
 
+    if (awaitingFirstSync) scheduleJoinTimeout();
+
     partySocket.addEventListener("open", () => {
       partyConnected = true;
       updateSyncPill();
-      if (awaitingFirstSync) scheduleJoinTimeout();
+      if (awaitingFirstSync) {
+        scheduleJoinTimeout();
+        sendGameAction("syncRequest");
+        startSyncRequestRetries();
+      }
     });
 
     partySocket.addEventListener("message", handlePartyMessage);
@@ -413,19 +482,6 @@ function main() {
       partyConnected = false;
       updateSyncPill();
     });
-  }
-
-  function reconnectParty() {
-    if (!usePartyKit() || !profile || !partySocket) return;
-    intentionallyClosed = false;
-    partySocket.updateProperties({
-      query: {
-        username: profile.lastName,
-        playerId: profile.playerId,
-        color: profile.color || selectedColor || COLORS[0].hex,
-      },
-    });
-    partySocket.reconnect();
   }
 
   function renderColorPicker() {
@@ -447,6 +503,7 @@ function main() {
 
   function showSetup(error) {
     awaitingFirstSync = false;
+    stopSyncRequestRetries();
     hideWsOverlay();
     $("game-name").readOnly = false;
     $("screen-setup").classList.remove("hidden");
@@ -508,6 +565,84 @@ function main() {
 
   function escapeAttr(s) {
     return String(s).replace(/"/g, "&quot;");
+  }
+
+  function showTurnEndedFeedback() {
+    const toast = $("turn-ended-toast");
+    const btn = $("btn-end-turn");
+    if (btn) {
+      btn.classList.remove("btn-end-turn-pulse");
+      void btn.offsetWidth;
+      btn.classList.add("btn-end-turn-pulse");
+      setTimeout(() => btn.classList.remove("btn-end-turn-pulse"), 900);
+    }
+    if (!toast) return;
+    if (turnEndedToastTimer) {
+      clearTimeout(turnEndedToastTimer);
+      turnEndedToastTimer = null;
+    }
+    toast.classList.remove("hidden", "opacity-0");
+    toast.classList.add("turn-ended-toast-visible");
+    turnEndedToastTimer = setTimeout(() => {
+      toast.classList.remove("turn-ended-toast-visible");
+      toast.classList.add("opacity-0");
+      turnEndedToastTimer = setTimeout(() => {
+        toast.classList.add("hidden");
+        toast.classList.remove("opacity-0");
+        turnEndedToastTimer = null;
+      }, 300);
+    }, 2800);
+  }
+
+  function closeCardTooltip() {
+    const b = $("card-tip-backdrop");
+    const p = $("card-tip-panel");
+    if (b) b.classList.add("hidden");
+    if (p) {
+      p.classList.add("hidden");
+      p.classList.remove("card-tip-panel-visible");
+    }
+  }
+
+  function openCardTooltip(cardType) {
+    const m = CARD_META[cardType];
+    if (!m) return;
+    const titleEl = $("card-tip-title");
+    const bodyEl = $("card-tip-body");
+    const backdrop = $("card-tip-backdrop");
+    const panel = $("card-tip-panel");
+    if (!titleEl || !bodyEl || !backdrop || !panel) return;
+    titleEl.textContent = m.title;
+    bodyEl.textContent = m.desc;
+    backdrop.classList.remove("hidden");
+    panel.classList.remove("hidden", "card-tip-panel-visible");
+    void panel.offsetWidth;
+    panel.classList.add("card-tip-panel-visible");
+  }
+
+  function renderMyPlayed() {
+    const game = currentGame();
+    const me = currentPlayer();
+    const strip = $("my-played-strip");
+    if (!strip) return;
+    if (!game || !me) {
+      strip.innerHTML = "";
+      return;
+    }
+    const played = (me.played || []).slice().reverse();
+    if (played.length === 0) {
+      strip.innerHTML =
+        '<span class="font-body text-xs text-on-surface-variant py-3 px-1">None yet — played knights and progress cards show up here.</span>';
+      return;
+    }
+    strip.innerHTML = played
+      .map((c) => {
+        const meta = CARD_META[c.type];
+        return `<button type="button" class="played-card-tip flex flex-col items-center justify-center w-14 h-[4.5rem] rounded-xl bg-white shadow-sm shrink-0 border border-outline-variant/20 active:scale-95 transition-transform" data-card-type="${escapeAttr(c.type)}" aria-label="${escapeAttr(meta.title)} — show what this card does">
+        <span class="material-symbols-outlined filled ${meta.accent} text-2xl">${meta.icon}</span>
+      </button>`;
+      })
+      .join("");
   }
 
   function renderHand() {
@@ -572,11 +707,12 @@ function main() {
         const hidden = p.hand.length;
         const played = (p.played || []).slice().reverse();
         const mini = played
-          .map(
-            (c) => `<div class="w-12 h-16 rounded-md bg-white overflow-hidden shrink-0 shadow-sm flex items-center justify-center" title="${CARD_META[c.type].title}">
-            <span class="material-symbols-outlined filled text-on-surface-variant text-xl">${CARD_META[c.type].icon}</span>
-          </div>`
-          )
+          .map((c) => {
+            const meta = CARD_META[c.type];
+            return `<button type="button" class="played-card-tip w-12 h-16 rounded-md bg-white overflow-hidden shrink-0 shadow-sm flex items-center justify-center border border-outline-variant/15 active:scale-95 transition-transform" data-card-type="${escapeAttr(c.type)}" aria-label="${escapeAttr(meta.title)} — show what this card does">
+            <span class="material-symbols-outlined filled text-on-surface-variant text-xl">${meta.icon}</span>
+          </button>`;
+          })
           .join("");
 
         return `<div class="bg-surface-container-low rounded-2xl p-4 shadow-sm pl-4" style="border-left: 4px solid ${p.color}">
@@ -589,7 +725,7 @@ function main() {
             <p class="font-label text-[10px] font-bold uppercase tracking-wider" style="color:${p.color}">${hidden} hidden</p>
           </div>
         </div>
-        <p class="font-label text-[10px] text-on-surface-variant mb-2 uppercase tracking-widest">Played</p>
+        <p class="font-label text-[10px] text-on-surface-variant mb-2 uppercase tracking-widest">Played <span class="lowercase font-body font-normal tracking-normal">· tap for rules</span></p>
         <div class="flex gap-2 overflow-x-auto hide-scrollbar pb-1">${mini || '<span class="text-xs text-on-surface-variant">None yet</span>'}</div>
       </div>`;
       })
@@ -646,41 +782,6 @@ function main() {
       .join("");
   }
 
-  function renderSwitchList() {
-    const game = currentGame();
-    const el = $("switch-player-list");
-    if (!game) return;
-
-    el.innerHTML = Object.entries(game.players)
-      .map(([id, p]) => {
-        const active = profile && id === profile.playerId;
-        return `<button type="button" data-player-id="${id}" class="switch-to w-full text-left px-4 py-3 rounded-xl font-headline text-sm flex items-center gap-3 ${
-          active ? "bg-surface-container-highest ring-2 ring-primary-container/30" : "bg-surface-container-high hover:bg-surface-container"
-        }">
-          <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
-          <span>${escapeHtml(p.name)}${active ? " (you)" : ""}</span>
-        </button>`;
-      })
-      .join("");
-
-    el.querySelectorAll(".switch-to").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = btn.getAttribute("data-player-id");
-        profile.playerId = id;
-        const p = game.players[id];
-        if (p) {
-          profile.lastName = p.name;
-          profile.color = p.color;
-        }
-        saveProfile(profile);
-        markHandsKnown(game);
-        if (usePartyKit()) reconnectParty();
-        closeDrawer();
-        renderApp();
-      });
-    });
-  }
-
   function renderApp() {
     const game = currentGame();
     const me = currentPlayer();
@@ -710,9 +811,9 @@ function main() {
 
     renderPlayerChips(game);
     renderHand();
+    renderMyPlayed();
     renderOthers();
     renderLog();
-    renderSwitchList();
     renderOnlineInRoom();
     updateSyncPill();
 
@@ -838,7 +939,7 @@ function main() {
     }
 
     awaitingFirstSync = true;
-    showWsOverlay("Joining room…", partyKitHost());
+    showWsOverlay("Joining room…");
     intentionallyClosed = false;
     openPartySocket();
   }
@@ -927,7 +1028,7 @@ function main() {
   function endMyTurn() {
     if (usePartyKit()) {
       if (!partyConnected) return;
-      sendGameAction("endTurn");
+      if (sendGameAction("endTurn")) showTurnEndedFeedback();
       return;
     }
 
@@ -937,6 +1038,7 @@ function main() {
     me.turnPhase = (typeof me.turnPhase === "number" ? me.turnPhase : 0) + 1;
     pushLog(game, profile.playerId, `${me.name} ended their turn.`, "");
     persist();
+    showTurnEndedFeedback();
     renderApp();
   }
 
@@ -994,6 +1096,19 @@ function main() {
     });
     $("btn-end-turn").addEventListener("click", endMyTurn);
 
+    $("screen-app").addEventListener("click", (e) => {
+      const tip = e.target.closest(".played-card-tip");
+      if (tip && tip.dataset.cardType) {
+        e.preventDefault();
+        openCardTooltip(tip.dataset.cardType);
+      }
+    });
+
+    const cardTipBackdrop = $("card-tip-backdrop");
+    const cardTipClose = $("card-tip-close");
+    if (cardTipBackdrop) cardTipBackdrop.addEventListener("click", closeCardTooltip);
+    if (cardTipClose) cardTipClose.addEventListener("click", closeCardTooltip);
+
     store = loadStore();
     profile = loadProfile();
 
@@ -1015,7 +1130,7 @@ function main() {
 
       if (usePartyKit()) {
         awaitingFirstSync = true;
-        showWsOverlay("Syncing game…", partyKitHost());
+        showWsOverlay("Syncing game…");
         openPartySocket();
       } else {
         showApp();

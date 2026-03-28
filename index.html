@@ -52,6 +52,28 @@
     body { font-family: "Work Sans", sans-serif; }
     .hide-scrollbar::-webkit-scrollbar { display: none; }
     .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    @keyframes turn-ended-enter {
+      from { opacity: 0; transform: translateY(18px) scale(0.96); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .turn-ended-toast-visible .turn-ended-toast-inner {
+      animation: turn-ended-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+    @keyframes end-turn-btn-ring {
+      0% { box-shadow: 0 0 0 0 rgba(63, 105, 1, 0.5); }
+      100% { box-shadow: 0 0 0 14px rgba(63, 105, 1, 0); }
+    }
+    .btn-end-turn-pulse {
+      animation: end-turn-btn-ring 0.85s ease-out;
+    }
+    @keyframes card-tip-pop {
+      from { opacity: 0; transform: translateY(10px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .card-tip-panel-visible {
+      animation: card-tip-pop 0.35s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
   </style>
 </head>
 <body class="bg-surface text-on-surface min-h-screen pb-28">
@@ -60,7 +82,6 @@
       <span class="material-symbols-outlined text-primary-container text-4xl animate-pulse">cloud_sync</span>
     </div>
     <p class="font-headline font-bold text-lg text-on-surface" id="ws-overlay-text">Connecting to game server…</p>
-    <p class="font-body text-sm text-on-surface-variant max-w-xs" id="ws-overlay-hint"></p>
   </div>
 
   <div id="screen-setup" class="min-h-screen flex flex-col items-center justify-center p-6">
@@ -70,7 +91,7 @@
           <span class="material-symbols-outlined filled text-primary-container text-5xl">style</span>
         </div>
         <h1 class="font-headline font-black text-4xl tracking-tighter text-on-surface">Development Deck</h1>
-        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards. Same <strong>game name</strong> = same <strong>PartyKit room</strong> (plus localStorage on each device). Deploy the worker with <code class="text-xs bg-surface-container-high px-1 rounded">npx partykit deploy</code> and set <code class="text-xs bg-surface-container-high px-1 rounded">window.__PARTYKIT_HOST__</code> on your Vercel build.</p>
+        <p class="font-body text-on-surface-variant text-sm px-4">Base game: 25 cards. Everyone who enters the <strong>same game name</strong> shares one table (synced live; this device also keeps a local copy).</p>
       </header>
       <section class="space-y-6">
         <div class="space-y-2">
@@ -136,6 +157,12 @@
         <p class="mt-4 font-body text-xs text-on-surface-variant px-1">Victory point cards are secret: they count toward winning and are not played. Reveal them when you win. Playable cards (knight, etc.) unlock after you tap End my turn.</p>
       </section>
 
+      <section class="mb-8">
+        <h3 class="font-headline text-lg font-bold tracking-tight mb-1 px-1">Your played cards</h3>
+        <p class="font-body text-[11px] text-on-surface-variant px-1 mb-3">Tap a miniature card for a rules reminder.</p>
+        <div id="my-played-strip" class="flex gap-2 overflow-x-auto hide-scrollbar pb-1 min-h-[4.75rem] items-center"></div>
+      </section>
+
       <section class="mb-10">
         <h3 class="font-headline text-2xl font-bold tracking-tight mb-4 px-1">Other players</h3>
         <div id="others-list" class="space-y-4"></div>
@@ -162,15 +189,11 @@
         <span class="material-symbols-outlined">close</span>
       </button>
     </div>
-    <p class="font-body text-xs text-on-surface-variant">Switch seats on this device, or add another player to the same saved game.</p>
+    <p class="font-body text-xs text-on-surface-variant">Add another player to this saved game from here, or leave to use a different name.</p>
     <div class="bg-surface-container-low rounded-xl p-3">
       <span class="font-label text-xs uppercase tracking-widest text-on-surface-variant">In this room (online)</span>
-      <p class="font-body text-[10px] text-on-surface-variant mt-1 mb-2">DiceNow-style list from PartyKit; game state still syncs for everyone in the same room id.</p>
+      <p class="font-body text-[10px] text-on-surface-variant mt-1 mb-2">Who is connected right now (same game name).</p>
       <ul id="online-users" class="list-none m-0 p-0"></ul>
-    </div>
-    <div>
-      <span class="font-label text-xs uppercase tracking-widest text-on-surface-variant">Switch player</span>
-      <div id="switch-player-list" class="mt-2 space-y-2"></div>
     </div>
     <button type="button" id="btn-add-player" class="w-full py-3 rounded-xl bg-surface-container-high font-headline font-semibold text-sm text-primary">Add another player</button>
     <hr class="border-0 h-px bg-surface-container-highest my-2" />
@@ -186,6 +209,23 @@
       <h3 class="font-headline text-xl font-bold tracking-tight">Action log</h3>
     </header>
     <div id="log-entries" class="flex-1 overflow-y-auto px-4 pt-2 pb-8 space-y-6"></div>
+  </div>
+
+  <div id="turn-ended-toast" class="hidden fixed left-0 right-0 z-[56] bottom-[5.75rem] flex justify-center px-4 pointer-events-none transition-opacity duration-300 opacity-100" role="status" aria-live="polite">
+    <div class="turn-ended-toast-inner max-w-[min(92vw,22rem)] rounded-2xl bg-secondary text-on-primary px-4 py-3 shadow-xl shadow-secondary/25 flex items-start gap-3 text-left">
+      <span class="material-symbols-outlined filled shrink-0 text-2xl text-white/95" aria-hidden="true">check_circle</span>
+      <div>
+        <p class="font-headline font-bold text-sm">Turn ended</p>
+        <p class="font-body text-xs text-white/90 mt-1 leading-relaxed">Your turn counter went up — development cards that were waiting on the “next turn” rule are ready to play when you choose.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="card-tip-backdrop" class="hidden fixed inset-0 z-[52] bg-on-surface/35" aria-hidden="true"></div>
+  <div id="card-tip-panel" class="hidden fixed left-4 right-4 z-[53] bottom-24 max-w-md mx-auto rounded-2xl bg-surface-container-high border border-outline-variant/30 shadow-2xl p-4">
+    <p class="font-headline font-bold text-primary text-lg" id="card-tip-title"></p>
+    <p class="font-body text-sm text-on-surface-variant mt-2 leading-relaxed" id="card-tip-body"></p>
+    <button type="button" id="card-tip-close" class="mt-4 w-full py-2.5 rounded-xl bg-surface-container font-headline font-semibold text-sm text-primary">Close</button>
   </div>
 
   <div id="modal-draw" class="hidden fixed inset-0 z-[80] flex items-center justify-center p-6 bg-on-surface/40 backdrop-blur-sm">
