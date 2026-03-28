@@ -145,6 +145,23 @@
     saveStore(store);
   }
 
+  function ensurePlayerTurnState(p) {
+    if (!p) return;
+    if (typeof p.turnPhase !== "number" || p.turnPhase < 0) {
+      p.turnPhase = 1;
+    }
+    if (!Array.isArray(p.hand)) p.hand = [];
+    p.hand.forEach((c) => {
+      if (typeof c.acquiredPhase !== "number") c.acquiredPhase = 0;
+    });
+  }
+
+  function canPlayCardNow(player, card) {
+    if (!player || !card) return false;
+    const ap = typeof card.acquiredPhase === "number" ? card.acquiredPhase : 0;
+    return player.turnPhase > ap;
+  }
+
   function pushLog(game, playerId, message, detail) {
     const p = game.players[playerId];
     const name = p ? p.name : "Unknown";
@@ -254,12 +271,16 @@
     grid.innerHTML = me.hand
       .map((c) => {
         const m = CARD_META[c.type];
-        const canPlay = m.playable;
-        const playBtn = canPlay
-          ? `<button type="button" class="play-card w-full py-2 bg-surface-container text-primary font-headline font-bold text-xs rounded-lg active:scale-95 transition-transform" data-id="${c.id}">Play card</button>`
+        const allowed = m.playable && canPlayCardNow(me, c);
+        const waiting = m.playable && !allowed;
+        const playBtn = m.playable
+          ? allowed
+            ? `<button type="button" class="play-card w-full py-2 bg-surface-container text-primary font-headline font-bold text-xs rounded-lg active:scale-95 transition-transform" data-id="${c.id}">Play card</button>`
+            : `<button type="button" disabled class="w-full py-2 bg-surface-dim text-on-surface-variant/50 font-headline font-bold text-xs rounded-lg cursor-not-allowed">Next turn</button>
+               <p class="font-label text-[10px] text-on-surface-variant text-center mt-1">Can’t play the turn you drew it</p>`
           : `<p class="font-label text-[10px] uppercase tracking-widest text-tertiary text-center py-2">Secret — do not play</p>`;
 
-        return `<div class="bg-surface-container-highest rounded-xl p-4 flex flex-col shadow-sm">
+        return `<div class="bg-surface-container-highest rounded-xl p-4 flex flex-col shadow-sm ${waiting ? "opacity-95" : ""}">
         <div class="mb-3">${cardBlock(c.type, false)}</div>
         <p class="font-body text-xs text-on-surface-variant mb-3 flex-grow">${m.desc}</p>
         ${playBtn}
@@ -379,6 +400,8 @@
       return;
     }
 
+    Object.values(game.players).forEach(ensurePlayerTurnState);
+
     $("header-title").textContent = profile.gameName || "Game";
     $("header-sub").textContent = `${me.name} · deck helper`;
     $("deck-remaining").textContent = String(game.deck.length);
@@ -436,6 +459,7 @@
         color: selectedColor,
         hand: [],
         played: [],
+        turnPhase: 0,
       };
       pushLog(game, playerId, `${playerName} joined the table.`);
     }
@@ -449,6 +473,7 @@
     saveProfile(profile);
     persist();
     $("game-name").readOnly = false;
+    Object.values(game.players).forEach(ensurePlayerTurnState);
     showApp();
   }
 
@@ -458,7 +483,7 @@
     if (!game || !me || game.deck.length === 0) return;
 
     const type = game.deck.shift();
-    const card = { id: uid(), type };
+    const card = { id: uid(), type, acquiredPhase: me.turnPhase };
     me.hand.push(card);
     pushLog(game, profile.playerId, `${me.name} drew a development card.`, "");
     persist();
@@ -478,6 +503,7 @@
     const card = me.hand[idx];
     const m = CARD_META[card.type];
     if (!m.playable) return;
+    if (!canPlayCardNow(me, card)) return;
 
     me.hand.splice(idx, 1);
     me.played = me.played || [];
@@ -500,9 +526,20 @@
     Object.values(game.players).forEach((p) => {
       p.hand = [];
       p.played = [];
+      p.turnPhase = 0;
     });
     game.log = [];
     pushLog(game, profile.playerId, "New shuffled deck (25 cards). Players unchanged.");
+    persist();
+    renderApp();
+  }
+
+  function endMyTurn() {
+    const game = currentGame();
+    const me = currentPlayer();
+    if (!game || !me) return;
+    me.turnPhase = (typeof me.turnPhase === "number" ? me.turnPhase : 0) + 1;
+    pushLog(game, profile.playerId, `${me.name} ended their turn.`, "");
     persist();
     renderApp();
   }
@@ -554,6 +591,11 @@
       view = "log";
       renderApp();
     });
+    $("btn-log-back").addEventListener("click", () => {
+      view = "hand";
+      renderApp();
+    });
+    $("btn-end-turn").addEventListener("click", endMyTurn);
 
     store = loadStore();
     profile = loadProfile();
@@ -562,6 +604,7 @@
       Object.values(store[profile.gameSlug].players).forEach((p) => {
         if (!Array.isArray(p.hand)) p.hand = [];
         if (!Array.isArray(p.played)) p.played = [];
+        ensurePlayerTurnState(p);
       });
       showApp();
     } else {
