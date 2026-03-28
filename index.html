@@ -196,10 +196,15 @@
     </div>
   </div>
 
-  <!-- Production (non-localhost): set PartyKit host from `npx partykit deploy` output, e.g.
-  <script>window.__PARTYKIT_HOST__ = "catancards-party.yourlogin.partykit.dev";</script>
-  Optional: <script>window.__PARTYKIT_PARTY__ = "catancards-party";</script> if your party name differs.
-  -->
+  <!-- PartyKit prod host (see https://docs.partykit.io/quickstart/ ); local dev uses localhost:1999 from app.js -->
+  <script>
+    (function () {
+      var h = location.hostname;
+      if (h !== "localhost" && h !== "127.0.0.1") {
+        window.__PARTYKIT_HOST__ = "catancards-party.bkocdur.partykit.dev";
+      }
+    })();
+  </script>
   <script type="importmap">
     { "imports": { "partysocket": "https://esm.sh/partysocket@1.1.16" } }
   </script>
